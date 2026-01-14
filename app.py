@@ -35,7 +35,6 @@ def load_json(path):
     except Exception:
         data = {}
 
-    # unify structure for agent memories
     data.setdefault("notes", [])
     data.setdefault("inbox", [])
     if not isinstance(data["notes"], list):
@@ -91,6 +90,12 @@ def set_chat_state(chat_id, **updates):
     save_json(MEMORY_PATH["CORE"], core)
     return st
 
+def truncate(s, limit=3800):
+    s = s or ""
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "\n…(обрезано)"
+
 # -------------------- Telegram API --------------------
 
 def tg(method, payload):
@@ -121,7 +126,7 @@ def edit_message(chat_id, message_id, text, reply_markup=None):
 
 def safe_upsert_panel(chat_id, text, keyboard):
     """
-    Keep ONE main message as 'screen'. If can't edit (e.g. deleted), send new and store msg_id.
+    Keep ONE main message as 'screen'. If can't edit, send new and store msg_id.
     """
     st = get_chat_state(chat_id)
     panel_id = st.get("panel_msg_id")
@@ -138,16 +143,9 @@ def safe_upsert_panel(chat_id, text, keyboard):
         set_chat_state(chat_id, panel_msg_id=new_id)
     return new_id
 
-def truncate(s, limit=3800):
-    s = s or ""
-    if len(s) <= limit:
-        return s
-    return s[:limit] + "\n…(обрезано)"
-
 # -------------------- UI (Inline Keyboards) --------------------
 
 def kb_home(active):
-    # agent tabs
     def tab(a):
         prefix = "✅ " if a == active else ""
         return {"text": f"{prefix}{a}", "callback_data": f"agent:{a}"}
@@ -175,14 +173,12 @@ def kb_back():
     return {"inline_keyboard": [[{"text": "⬅️ Назад", "callback_data": "back:HOME"}]]}
 
 def kb_tasks(agent, mem):
-    # show open tasks; allow closing by buttons
     open_items = []
     for i, it in enumerate(mem.get("inbox", []), start=1):
         if it.get("status") == "open":
             open_items.append((i, it.get("text", "")))
 
     rows = []
-    # limit buttons to avoid huge keyboard
     for i, _ in open_items[:8]:
         rows.append([{"text": f"✅ Закрыть #{i}", "callback_data": f"done:{agent}:{i}"}])
 
@@ -220,23 +216,21 @@ def render_home(chat_id):
     st = get_chat_state(chat_id)
     a = st["active_agent"]
     text = (
-        f"🏢 Katya AI Office\n"
-        f"Активный отдел: **{a}**\n\n"
+        "🏢 Katya AI Office\n"
+        f"Активный отдел: {a}\n\n"
         "Выбирай отдел (вкладку) и работай через кнопки ниже.\n"
-        "➕ Добавить — чтобы записать задачу/факт.\n"
+        "➕ Добавить — чтобы записать задачу/факт.\n\n"
+        "Поддерживается ввод по-человечески:\n"
+        "• задача: ...\n"
+        "• факт: ...\n"
     )
-    # Telegram Markdown is picky; keep plain text:
-    text = text.replace("**", "")
     safe_upsert_panel(chat_id, text, kb_home(a))
     set_chat_state(chat_id, screen="HOME", awaiting=None)
 
 def render_add(chat_id):
     st = get_chat_state(chat_id)
     a = st["active_agent"]
-    text = (
-        f"➕ Добавление в отдел: {a}\n\n"
-        "Выбери, что добавить:"
-    )
+    text = f"➕ Добавление в отдел: {a}\n\nВыбери, что добавить:"
     safe_upsert_panel(chat_id, text, kb_add())
     set_chat_state(chat_id, screen="ADD")
 
@@ -306,7 +300,7 @@ def render_summary(chat_id):
     safe_upsert_panel(chat_id, truncate("\n".join(out)), kb_back())
     set_chat_state(chat_id, screen="SUMMARY", awaiting=None)
 
-# -------------------- Optional OpenAI (only when key works) --------------------
+# -------------------- Optional OpenAI --------------------
 
 def ask_openai(system, user):
     if not OPENAI_KEY:
@@ -344,19 +338,53 @@ def system_prompt(agent, memory):
     }[agent]
     return f"{base}\nОперационная память (JSON): {mem_text}"
 
-# -------------------- Text dispatcher (kept) --------------------
+# -------------------- Text dispatcher --------------------
 
 def parse_target_agent(text, default_agent):
-    t = text.strip()
+    t = (text or "").strip()
     up = t.upper()
     for a in AGENTS:
         marker = f"@{a}"
         if marker in up:
-            cleaned = up.replace(marker, "").strip()
-            # restore original minus marker (simple approach)
             cleaned2 = t.replace(marker, "").replace(marker.lower(), "").strip()
             return a, cleaned2
     return default_agent, t
+
+def parse_soft_commands(tt: str):
+    """
+    Понимаем команды по-человечески:
+    - задача: ...
+    - задача ...
+    - факт: ...
+    - факт ...
+    И старые:
+    - +задача: ...
+    - +факт: ...
+    """
+    s = (tt or "").strip()
+    low = s.lower()
+
+    # +задача:
+    if low.startswith("+задача:"):
+        return ("TASK", s.split(":", 1)[1].strip())
+    # задача:
+    if low.startswith("задача:"):
+        return ("TASK", s.split(":", 1)[1].strip())
+    # задача (без :)
+    if low.startswith("задача "):
+        return ("TASK", s[len("задача "):].strip())
+
+    # +факт:
+    if low.startswith("+факт:"):
+        return ("FACT", s.split(":", 1)[1].strip())
+    # факт:
+    if low.startswith("факт:"):
+        return ("FACT", s.split(":", 1)[1].strip())
+    # факт (без :)
+    if low.startswith("факт "):
+        return ("FACT", s[len("факт "):].strip())
+
+    return (None, None)
 
 # -------------------- Routes --------------------
 
@@ -381,8 +409,6 @@ def webhook():
             if cb_id:
                 answer_cb(cb_id)
             return "ok", 200
-
-        st = get_chat_state(chat_id)
 
         # agent switching
         if data.startswith("agent:"):
@@ -458,7 +484,7 @@ def webhook():
             try:
                 _, agent, idx = data.split(":")
                 idx = int(idx)
-                ok, info = close_task(agent, idx)
+                ok, _ = close_task(agent, idx)
                 if cb_id:
                     answer_cb(cb_id, "Закрыто ✅" if ok else "Не получилось")
                 render_tasks(chat_id)
@@ -484,14 +510,13 @@ def webhook():
 
     # /start
     if t.lower() == "/start":
-        # keep panel message stable
         set_chat_state(chat_id, screen="HOME", awaiting=None)
         render_home(chat_id)
         return "ok", 200
 
     st = get_chat_state(chat_id)
 
-    # if awaiting input
+    # if awaiting input from ADD screen
     if st.get("awaiting") in ("TASK", "FACT") and t:
         a = st.get("active_agent", "CORE")
         if st["awaiting"] == "TASK":
@@ -504,20 +529,23 @@ def webhook():
             render_memory(chat_id)
         return "ok", 200
 
-    # keep support for manual commands
+    # manual routing via @AGENT in text
     active = st.get("active_agent", "CORE")
     target_agent, cleaned = parse_target_agent(t, active)
     tt = cleaned.strip()
 
-    if tt.lower().startswith("+задача:"):
-        task_text = tt.split(":", 1)[1].strip()
-        add_task(target_agent, task_text)
+    # мягкие команды (задача/факт без плюса тоже)
+    cmd, payload = parse_soft_commands(tt)
+    if cmd == "TASK" and payload:
+        add_task(target_agent, payload)
+        # показать список задач сразу (чтобы было видно что сохранилось)
+        set_chat_state(chat_id, active_agent=target_agent)
         render_tasks(chat_id)
         return "ok", 200
 
-    if tt.lower().startswith("+факт:"):
-        fact_text = tt.split(":", 1)[1].strip()
-        add_fact(target_agent, fact_text)
+    if cmd == "FACT" and payload:
+        add_fact(target_agent, payload)
+        set_chat_state(chat_id, active_agent=target_agent)
         render_memory(chat_id)
         return "ok", 200
 
@@ -530,18 +558,18 @@ def webhook():
     answer = ask_openai(system_prompt(target_agent, mem), tt)
 
     if not answer:
-        # Don't spam. Just show home screen and hint.
         safe_upsert_panel(
             chat_id,
-            f"🏢 Katya AI Office\nАктивный отдел: {target_agent}\n\n"
-            "Я могу вести задачи/память через кнопки.\n"
-            "Ответы ИИ появятся, когда OpenAI ключ/лимиты точно активны.\n\n"
+            "🏢 Katya AI Office\n"
+            f"Активный отдел: {target_agent}\n\n"
+            "Я точно веду задачи/память через кнопки.\n"
+            "ИИ-ответы появятся, когда OpenAI ключ/лимиты реально активны.\n\n"
             "Нажми: ➕ Добавить / 📥 Задачи / 🧠 Память",
             kb_home(target_agent)
         )
         return "ok", 200
 
-    # show answer in separate message (short), keep panel clean
+    # send answer separately to not ruin the panel
     send_message(chat_id, truncate(answer, 3500), None)
     render_home(chat_id)
     return "ok", 200
