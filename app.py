@@ -31,9 +31,16 @@ MARKETING = "Ты маркетолог Кати. Дай стратегию и с
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    text = data["message"]["text"]
-    chat_id = data["message"]["chat"]["id"]
+   data = request.json
+
+message = data.get("message", {})
+chat = message.get("chat", {})
+chat_id = chat.get("id")
+
+text = message.get("text")
+if not text or not chat_id:
+    return "ok"
+
 
     route = ask_gpt(CORE, text)
 
