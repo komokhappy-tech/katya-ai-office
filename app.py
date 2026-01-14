@@ -25,7 +25,7 @@ MEMORY_PATH = {
 CHAT_MODE = {}  # chat_id -> agent
 
 
-# -------------------- memory I/O --------------------
+# -------------------- Memory I/O --------------------
 
 def load_json(path):
     try:
@@ -51,7 +51,44 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# -------------------- Telegram helpers --------------------
+# -------------------- Telegram UI --------------------
+
+def reply_keyboard_main():
+    # постоянная нижняя панель
+    return {
+        "keyboard": [
+            [{"text": "🏠 Меню"}, {"text": "📥 Задачи"}, {"text": "🧠 Память"}],
+            [{"text": "➕ Задача"}, {"text": "➕ Факт"}]
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True
+    }
+
+
+def reply_keyboard_menu():
+    return {
+        "keyboard": [
+            [{"text": "🧭 Управление"}, {"text": "🆕 Новый диалог"}],
+            [{"text": "👤 Профиль"}, {"text": "📚 База знаний"}],
+            [{"text": "⬅️ Назад"}]
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True
+    }
+
+
+def reply_keyboard_agents(active):
+    rows = [
+        [{"text": f"{'✅ ' if active == 'CORE' else ''}CORE"},
+         {"text": f"{'✅ ' if active == 'LOOK' else ''}LOOK"},
+         {"text": f"{'✅ ' if active == 'MARKETING' else ''}MARKETING"}],
+        [{"text": f"{'✅ ' if active == 'MONEY' else ''}MONEY"},
+         {"text": f"{'✅ ' if active == 'FAMILY' else ''}FAMILY"},
+         {"text": f"{'✅ ' if active == 'PERSONAL' else ''}PERSONAL"}],
+        [{"text": "⬅️ Назад"}]
+    ]
+    return {"keyboard": rows, "resize_keyboard": True, "is_persistent": True}
+
 
 def send(chat_id, text, keyboard=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -60,31 +97,11 @@ def send(chat_id, text, keyboard=None):
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
 
 
-def edit(chat_id, msg_id, text, keyboard=None):
-    payload = {"chat_id": chat_id, "message_id": msg_id, "text": text}
-    if keyboard:
-        payload["reply_markup"] = keyboard
-    requests.post(f"{TELEGRAM_API}/editMessageText", json=payload, timeout=20)
-
-
-def tabs(active):
-    def b(label):
-        prefix = "• " if label == active else ""
-        return {"text": prefix + label, "callback_data": f"MODE:{label}"}
-
-    return {
-        "inline_keyboard": [
-            [b("CORE"), b("LOOK"), b("MARKETING")],
-            [b("MONEY"), b("FAMILY"), b("PERSONAL")]
-        ]
-    }
-
-
-# -------------------- command dispatcher --------------------
+# -------------------- Dispatcher --------------------
 
 def parse_target_agent(text, default_agent):
     """
-    Поддержка адресации:
+    Адресация:
     +задача @LOOK: ...
     +факт @MONEY: ...
     """
@@ -93,7 +110,6 @@ def parse_target_agent(text, default_agent):
     for a in AGENTS:
         marker = f"@{a}"
         if marker in t.upper():
-            # вырежем маркер
             cleaned = t.replace(marker, "").replace(marker.lower(), "").strip()
             return a, cleaned
 
@@ -119,7 +135,7 @@ def close_task(agent, idx):
     item["status"] = "done"
     item["done_at"] = datetime.utcnow().isoformat() + "Z"
     save_json(MEMORY_PATH[agent], mem)
-    return True, item["text"]
+    return True, item.get("text", "")
 
 
 def add_fact(agent, fact_text):
@@ -132,27 +148,29 @@ def add_fact(agent, fact_text):
 def format_tasks(agent, mem):
     items = mem.get("inbox", [])
     if not items:
-        return f"Задачи {agent}: пусто."
+        return f"📥 Задачи {agent}: пусто.\n\nКоманды:\n+задача: ...\n-готово N"
 
-    lines = [f"Задачи {agent}:"]
-    n = 0
+    lines = [f"📥 Задачи {agent}:"]
+    open_count = 0
     for i, it in enumerate(items, start=1):
-        status = it.get("status", "open")
-        if status == "open":
-            n += 1
-            lines.append(f"{i}. {it.get('text','')}")
-    if n == 0:
+        if it.get("status") == "open":
+            open_count += 1
+            lines.append(f"{i}. {it.get('text', '')}")
+
+    if open_count == 0:
         lines.append("Открытых задач нет.")
-    lines.append("\nКоманда: -готово N")
+
+    lines.append("\nКоманды:\n+задача: ...\n-готово N")
     return "\n".join(lines)
 
 
 def format_summary(agent, mem):
     notes = mem.get("notes", [])[-5:]
-    inbox = [x for x in mem.get("inbox", []) if x.get("status") == "open"][:5]
+    inbox_open = [x for x in mem.get("inbox", []) if x.get("status") == "open"][:5]
 
-    out = [f"Сводка: {agent}", ""]
-    out.append("Память (последнее):")
+    out = [f"🧾 Сводка: {agent}", ""]
+
+    out.append("🧠 Память (последнее):")
     if notes:
         for n in notes:
             out.append(f"• {n}")
@@ -160,15 +178,15 @@ def format_summary(agent, mem):
         out.append("• пока пусто")
 
     out.append("")
-    out.append("Задачи (топ-5):")
-    if inbox:
-        for i, it in enumerate(inbox, start=1):
-            out.append(f"{i}) {it.get('text','')}")
+    out.append("📥 Задачи (топ-5):")
+    if inbox_open:
+        for i, it in enumerate(inbox_open, start=1):
+            out.append(f"{i}) {it.get('text', '')}")
     else:
         out.append("• пока пусто")
 
     out.append("")
-    out.append("Команды: +факт: ... | +задача: ... | ?задачи | ?память | ?сводка")
+    out.append("Команды: +факт: ... | +задача: ... | ?сводка | -готово N")
     return "\n".join(out)
 
 
@@ -192,23 +210,26 @@ def ask_openai(system, user):
     if r.status_code != 200:
         return None
 
-    return r.json()["choices"][0]["message"]["content"].strip()
+    try:
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None
 
 
 def system_prompt(agent, memory):
     mem_text = json.dumps(memory, ensure_ascii=False)
     base = {
         "CORE": "Ты CORE.AI — штаб: превращаешь хаос в план и решения.",
-        "LOOK": "Ты LOOK.AI — директор салона LOOK: запись, услуги, геосервисы, контент.",
+        "LOOK": "Ты LOOK.AI — директор салона LOOK: задачи, геосервисы, контент, продажи.",
         "MARKETING": "Ты MARKETING.AI — маркетолог и наставник: делаем и учимся.",
-        "MONEY": "Ты MONEY.AI — финдиректор: считаешь, предлагаешь решения.",
-        "FAMILY": "Ты FAMILY.AI — семейный координатор: быт, договоренности, конфликты.",
+        "MONEY": "Ты MONEY.AI — финдиректор: считаешь, предлагаешь решения, контролируешь бюджет.",
+        "FAMILY": "Ты FAMILY.AI — семейный координатор: быт, договорённости, коммуникация.",
         "PERSONAL": "Ты PERSONAL.AI — личный коуч: привычки, здоровье, цели."
     }[agent]
     return f"{base}\nОперационная память (JSON): {mem_text}"
 
 
-# -------------------- routes --------------------
+# -------------------- Routes --------------------
 
 @app.get("/")
 def health():
@@ -219,27 +240,6 @@ def health():
 def webhook():
     update = request.get_json(silent=True) or {}
 
-    # кнопки вкладок
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        data = cq.get("data", "")
-        msg = cq.get("message", {})
-        chat_id = (msg.get("chat") or {}).get("id")
-        msg_id = msg.get("message_id")
-
-        if chat_id and msg_id and data.startswith("MODE:"):
-            mode = data.split("MODE:", 1)[1].strip().upper()
-            if mode in AGENTS:
-                CHAT_MODE[chat_id] = mode
-                edit(
-                    chat_id,
-                    msg_id,
-                    f"Режим: {mode}\n\nКоманды:\n+факт: ...\n+задача: ...\n?сводка | ?задачи | ?память\n-готово N",
-                    tabs(mode),
-                )
-        return "ok", 200
-
-    # сообщение
     msg = update.get("message") or update.get("edited_message") or {}
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
@@ -249,73 +249,128 @@ def webhook():
         return "ok", 200
 
     active = CHAT_MODE.get(chat_id, "CORE")
+    t = (text or "").strip()
 
-    if text.strip().lower() == "/start":
+    # /start
+    if t.lower() == "/start":
         CHAT_MODE[chat_id] = "CORE"
         send(
             chat_id,
-            "AI Office включён.\nВыбирай вкладку и работай по отделам.\n\nКоманды:\n+факт: ...\n+задача: ...\n?сводка | ?задачи | ?память\n-готово N",
-            tabs("CORE"),
+            "AI Office включён.\nНажимай кнопки внизу — это твоя панель.\n\n"
+            "Быстрые команды:\n"
+            "• +задача: ...\n"
+            "• +факт: ...\n"
+            "• ?сводка\n"
+            "• -готово N",
+            reply_keyboard_main()
         )
         return "ok", 200
 
-    # диспетчер: цель агента через @AGENT
-    target_agent, cleaned = parse_target_agent(text, active)
-    t = cleaned.strip()
+    # Панель
+    if t == "🏠 Меню":
+        send(chat_id, "Меню:", reply_keyboard_menu())
+        return "ok", 200
 
-    # команды диспетчера
+    if t == "⬅️ Назад":
+        send(chat_id, "Назад в рабочую панель.", reply_keyboard_main())
+        return "ok", 200
+
+    if t == "🧭 Управление":
+        active = CHAT_MODE.get(chat_id, "CORE")
+        send(chat_id, "Выбери ассистента:", reply_keyboard_agents(active))
+        return "ok", 200
+
+    # выбор агента
+    clean = t.replace("✅ ", "").strip()
+    if clean in AGENTS:
+        CHAT_MODE[chat_id] = clean
+        send(chat_id, f"Режим установлен: {clean}", reply_keyboard_main())
+        return "ok", 200
+
+    if t == "📥 Задачи":
+        active = CHAT_MODE.get(chat_id, "CORE")
+        mem = load_json(MEMORY_PATH[active])
+        send(chat_id, format_tasks(active, mem), reply_keyboard_main())
+        return "ok", 200
+
+    if t == "🧠 Память":
+        active = CHAT_MODE.get(chat_id, "CORE")
+        mem = load_json(MEMORY_PATH[active])
+        send(chat_id, json.dumps(mem, ensure_ascii=False, indent=2), reply_keyboard_main())
+        return "ok", 200
+
+    if t == "➕ Задача":
+        send(chat_id, "Напиши задачу в формате:\n+задача: ...\n\nМожно так:\n+задача @LOOK: ...", reply_keyboard_main())
+        return "ok", 200
+
+    if t == "➕ Факт":
+        send(chat_id, "Напиши факт в формате:\n+факт: ...\n\nМожно так:\n+факт @MONEY: ...", reply_keyboard_main())
+        return "ok", 200
+
+    if t == "🆕 Новый диалог":
+        CHAT_MODE[chat_id] = "CORE"
+        send(chat_id, "Ок, новый диалог. Режим: CORE", reply_keyboard_main())
+        return "ok", 200
+
+    if t == "👤 Профиль":
+        active = CHAT_MODE.get(chat_id, "CORE")
+        send(chat_id, f"Профиль (заглушка). Текущий режим: {active}\n\nСкоро добавим настройки.", reply_keyboard_main())
+        return "ok", 200
+
+    if t == "📚 База знаний":
+        send(chat_id, "База знаний (заглушка). Сюда добавим ссылки, шаблоны, инструкции.", reply_keyboard_main())
+        return "ok", 200
+
+    # Текстовые команды диспетчера
     if t.lower() in ("?сводка", "/summary"):
-        mem = load_json(MEMORY_PATH[target_agent])
-        send(chat_id, format_summary(target_agent, mem), tabs(active))
+        active = CHAT_MODE.get(chat_id, "CORE")
+        mem = load_json(MEMORY_PATH[active])
+        send(chat_id, format_summary(active, mem), reply_keyboard_main())
         return "ok", 200
 
-    if t.lower() in ("?задачи", "/tasks"):
-        mem = load_json(MEMORY_PATH[target_agent])
-        send(chat_id, format_tasks(target_agent, mem), tabs(active))
-        return "ok", 200
+    # адресация @AGENT внутри команд
+    target_agent, cleaned = parse_target_agent(t, CHAT_MODE.get(chat_id, "CORE"))
+    tt = cleaned.strip()
 
-    if t.lower() in ("?память", "/memory"):
-        mem = load_json(MEMORY_PATH[target_agent])
-        send(chat_id, json.dumps(mem, ensure_ascii=False, indent=2), tabs(active))
-        return "ok", 200
-
-    if t.lower().startswith("+задача:"):
-        task_text = t.split(":", 1)[1].strip()
+    if tt.lower().startswith("+задача:"):
+        task_text = tt.split(":", 1)[1].strip()
         n = add_task(target_agent, task_text)
-        send(chat_id, f"Задача добавлена в {target_agent} (№{n}).", tabs(active))
+        send(chat_id, f"Задача добавлена в {target_agent} (№{n}).", reply_keyboard_main())
         return "ok", 200
 
-    if t.lower().startswith("+факт:"):
-        fact_text = t.split(":", 1)[1].strip()
+    if tt.lower().startswith("+факт:"):
+        fact_text = tt.split(":", 1)[1].strip()
         n = add_fact(target_agent, fact_text)
-        send(chat_id, f"Факт сохранён в {target_agent} (№{n}).", tabs(active))
+        send(chat_id, f"Факт сохранён в {target_agent} (№{n}).", reply_keyboard_main())
         return "ok", 200
 
-    if t.lower().startswith("-готово"):
-        parts = t.split()
+    if tt.lower().startswith("-готово"):
+        parts = tt.split()
         if len(parts) >= 2 and parts[1].isdigit():
             ok, info = close_task(target_agent, int(parts[1]))
-            if ok:
-                send(chat_id, f"Готово: {info}", tabs(active))
-            else:
-                send(chat_id, info, tabs(active))
+            send(chat_id, (f"Готово: {info}" if ok else info), reply_keyboard_main())
         else:
-            send(chat_id, "Формат: -готово N", tabs(active))
+            send(chat_id, "Формат: -готово N", reply_keyboard_main())
         return "ok", 200
 
-    # обычный запрос: если OpenAI доступен — ответит умно, если нет — предложим командный режим
+    # обычный запрос: если OpenAI доступен — ответит, если нет — предложит диспетчер
     mem = load_json(MEMORY_PATH[target_agent])
-    answer = ask_openai(system_prompt(target_agent, mem), t)
+    answer = ask_openai(system_prompt(target_agent, mem), tt)
 
     if not answer:
         send(
             chat_id,
-            f"Я принял запрос в режиме {target_agent}, но сейчас нет доступа к OpenAI.\n"
-            "Можем работать в диспетчер-режиме:\n"
-            "• +задача: ...\n• +факт: ...\n• ?сводка / ?задачи / ?память",
-            tabs(active)
+            f"Сейчас нет доступа к OpenAI (billing/лимиты/ключ).\n"
+            f"Но диспетчер работает. Режим: {target_agent}\n\n"
+            "Попробуй:\n"
+            "• +задача: ...\n"
+            "• +факт: ...\n"
+            "• ?сводка\n"
+            "• 📥 Задачи / 🧠 Память",
+            reply_keyboard_main()
         )
         return "ok", 200
 
-    send(chat_id, answer, tabs(active))
+    send(chat_id, answer, reply_keyboard_main())
     return "ok", 200
+
