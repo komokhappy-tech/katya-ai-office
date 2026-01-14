@@ -2,60 +2,36 @@ import os
 import requests
 from flask import Flask, request
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OPENAI_KEY = os.environ.get("OPENAI_KEY")
-
 app = Flask(__name__)
 
-def ask_gpt(system_prompt, user_text):
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENAI_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text}
-            ],
-            "temperature": 0.3
-        }
-    )
-    return r.json()["choices"][0]["message"]["content"]
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+OPENAI_KEY = os.environ.get("OPENAI_KEY", "").strip()
 
-CORE = "Ответь только LOOK или MARKETING. Если это про салон — LOOK. Иначе MARKETING."
-LOOK = "Ты директор салона красоты LOOK. Дай чёткий план действий."
-MARKETING = "Ты маркетолог Кати. Дай стратегию и следующие шаги."
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-   data = request.json
+# --- Prompts ---
+CORE_PROMPT = (
+    "Ты CORE.AI — маршрутизатор. Определи категорию сообщения.\n"
+    "Если это про салон красоты LOOK (запись, мастера, услуги, акции, геосервисы, отзывы, контент салона) — ответь: LOOK.\n"
+    "Если это про работу Кати как маркетолога (клиенты, стратегия, офферы, контент-план, воронки, продажи, обучение, проекты кроме LOOK) — ответь: MARKETING.\n"
+    "Ответь строго одним словом: LOOK или MARKETING."
+)
 
-message = data.get("message", {})
-chat = message.get("chat", {})
-chat_id = chat.get("id")
+LOOK_PROMPT = (
+    "Ты LOOK.AI — управляющий салоном красоты LOOK.\n"
+    "Отвечай структурно:\n"
+    "1) Что происходит\n"
+    "2) Что делать (3–7 шагов)\n"
+    "3) Что спросить/проверить дальше\n"
+)
 
-text = message.get("text")
-if not text or not chat_id:
-    return "ok"
+MARKETING_PROMPT = (
+    "Ты MARKETING.AI — маркетинговый мозг Кати.\n"
+    "Отвечай структурно:\n"
+    "1) Диагностика\n"
+    "2) Гипотезы\n"
+    "3) План на 3–7 шагов\n"
+    "4) Что нужно уточнить\n"
+)
 
-
-    route = ask_gpt(CORE, text)
-
-    if "LOOK" in route:
-        answer = ask_gpt(LOOK, text)
-    else:
-        answer = ask_gpt(MARKETING, text)
-
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": answer}
-    )
-
-    return "ok"
-
-@app.route("/", methods=["GET"])
-def index():
-    return "Alive"
+# --- Helpers
